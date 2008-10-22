@@ -9,7 +9,7 @@ use Coro;
 use base qw(Net::Server);
 use Net::Server::Proto::Coro;
 
-$VERSION = 0.2;
+$VERSION = 0.3;
 
 =head1 NAME
 
@@ -45,6 +45,7 @@ usage details.
 sub post_bind_hook {
     my $self = shift;
     my $prop = $self->{server};
+    delete $prop->{select};
     $prop->{sock} = [ map { make_coro_socket($_) } @{ $prop->{sock} } ];
 }
 
@@ -80,6 +81,12 @@ sub coro_instance {
     close $fh;
 }
 
+# We override this to do nothing, or Net::Server closes
+# $self->{server}{client} -- which is he most recent connection, not
+# necessarily the current connection.  We also don't want the
+# STDERR/STDOUT redirection.
+sub post_process_request {}
+
 =head2 loop
 
 The main loop uses starts a number of L<Coro> coroutines:
@@ -107,6 +114,7 @@ The L<EV> event loop.
 sub loop {
     my $self = shift;
     my $prop = $self->{server};
+    $prop->{no_client_stdout} = 1;
 
     for my $socket ( @{ $prop->{sock} } ) {
         async {

@@ -7,10 +7,12 @@ use vars qw($VERSION);
 use EV;
 use Coro;
 use Coro::Specific;
+use Coro::Util ();
+use Socket ();
 use base qw(Net::Server);
 use Net::Server::Proto::Coro;
 
-$VERSION = 0.7;
+$VERSION = 0.8;
 
 =head1 NAME
 
@@ -82,7 +84,7 @@ sub post_bind_hook {
     $prop->{sock} = [ map { $self->make_coro_socket($_) } @{ $prop->{sock} } ];
 
     # set up coro::specific variables
-    foreach my $key (qw(client sockaddr sockport peeraddr peerport)) {
+    foreach my $key (qw(client sockaddr sockport peeraddr peerport peerhost)) {
         tie $prop->{$key}, Coro::Specific::;
     }
 }
@@ -123,13 +125,21 @@ sub coro_instance {
     $self->run_client_connection;
 }
 
-sub post_accept_hook {
+sub get_client_info {
     my $self = shift;
     my $prop = $self->{server};
     my $sock = $prop->{client};
 
     ($prop->{sockaddr}, $prop->{sockport}) = ($sock->sockhost, $sock->sockport);
     ($prop->{peeraddr}, $prop->{peerport}) = ($sock->peerhost, $sock->peerport);
+
+    if (defined $prop->{reverse_lookups}) {
+        $prop->{peerhost} = Coro::Util::gethostbyaddr($sock->peeraddr, Socket::AF_INET);
+    }
+
+    $self->log(3, $self->log_time
+        ." CONNECT TCP Peer: \"$prop->{peeraddr}:$prop->{peerport}\""
+        ." Local: \"$prop->{sockaddr}:$prop->{sockport}\"\n");
 }
 
 =head2 loop

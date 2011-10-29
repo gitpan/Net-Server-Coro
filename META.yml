@@ -16,11 +16,12 @@ name: Net-Server-Coro
 no_index:
   directory:
     - inc
+recommends:
+  Net::SSLeay: 0
 requires:
   Coro: 0
   EV: 0
-  Net::SSLeay: 0
   Net::Server: 0
 resources:
   license: http://opensource.org/licenses/mit-license.php
-version: 1.1
+version: 1.2

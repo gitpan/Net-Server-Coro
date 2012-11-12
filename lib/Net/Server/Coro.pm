@@ -4,7 +4,7 @@ use warnings;
 package Net::Server::Coro;
 
 use vars qw($VERSION);
-use EV;
+use AnyEvent;
 use Coro;
 use Coro::Specific;
 use Coro::Util ();
@@ -12,7 +12,7 @@ use Socket ();
 use base qw(Net::Server);
 use Net::Server::Proto::Coro;
 
-$VERSION = '1.2';
+$VERSION = '1.3';
 
 =head1 NAME
 
@@ -50,6 +50,8 @@ usage details.
 Create new Net::Server::Coro object. It accepts these parameters (in
 addition to L<Net::Server> parameters):
 
+=over
+
 =item server_cert
 
 Path to the SSL certificate that the server should use. This can be
@@ -61,6 +63,8 @@ F<certs/server-cert.pem>
 Path to the SSL certificate key that the server should use. This can
 be either relative or absolute path.  Defaults to
 F<certs/server-key.pem>
+
+=back
 
 =cut
 
@@ -82,7 +86,7 @@ sub post_bind_hook {
     delete $prop->{select};
 
     # set up coro::specific variables
-    foreach my $key (qw(client sockaddr sockport peeraddr peerport peerhost)) {
+    foreach my $key (qw(client sockaddr sockport sockhost peeraddr peerport peerhost peername)) {
         tie $prop->{$key}, Coro::Specific::;
     }
 }
@@ -96,11 +100,11 @@ L<Net::Server::Proto::Coro> objects.
 
 sub proto_object {
     my $self = shift;
-    my ($host, $port, $proto) = @_;
+    my ($info) = @_;
 
-    my $is_ssl = ($proto eq "SSL" or $proto eq "SSLEAY");
+    my $is_ssl = ($info->{proto} =~ /^SSL(EAY)?$/);
     my $socket = $self->SUPER::proto_object(
-        $host, $port, $is_ssl ? "TCP" : $proto
+        { %{$info}, $is_ssl ? (proto => "TCP") : () },
     );
     $socket = Net::Server::Proto::Coro->new_from_fh(
         $socket,
@@ -123,19 +127,33 @@ sub coro_instance {
 
 sub get_client_info {
     my $self = shift;
-    my $prop = $self->{server};
-    my $sock = $prop->{client};
+    my $prop = $self->{'server'};
+    my $client = shift || $prop->{'client'};
 
-    ($prop->{sockaddr}, $prop->{sockport}) = ($sock->sockhost, $sock->sockport);
-    ($prop->{peeraddr}, $prop->{peerport}) = ($sock->peerhost, $sock->peerport);
+    if ($client->sockname) {
+        $prop->{'sockaddr'} = $client->sockhost;
+        $prop->{'sockport'} = $client->sockport;
+    } else {
+        @{ $prop }{qw(sockaddr sockhost sockport)} = ($ENV{'REMOTE_HOST'} || '0.0.0.0', 'inet.test', 0); # commandline
+    }
 
-    if (defined $prop->{reverse_lookups}) {
-        $prop->{peerhost} = Coro::Util::gethostbyaddr($sock->peeraddr, Socket::AF_INET);
+    my $addr;
+    if ($prop->{'peername'} = $client->peername) {
+        $addr               = $client->peeraddr;
+        $prop->{'peeraddr'} = $client->peerhost;
+        $prop->{'peerport'} = $client->peerport;
+    } else {
+        @{ $prop }{qw(peeraddr peerhost peerport)} = ('0.0.0.0', 'inet.test', 0); # commandline
+    }
+
+    if ($addr && defined $prop->{'reverse_lookups'}) {
+        $prop->{peerhost} = Coro::Util::gethostbyaddr($addr, Socket::AF_INET);
     }
 
     $self->log(3, $self->log_time
-        ." CONNECT TCP Peer: \"$prop->{peeraddr}:$prop->{peerport}\""
-        ." Local: \"$prop->{sockaddr}:$prop->{sockport}\"\n");
+               ." CONNECT ".$client->NS_proto
+               ." Peer: \"[$prop->{'peeraddr'}]:$prop->{'peerport'}\""
+               ." Local: \"[$prop->{'sockaddr'}]:$prop->{'sockport'}\"") if $prop->{'log_level'} && 3 <= $prop->{'log_level'};
 }
 
 =head2 loop
@@ -156,7 +174,7 @@ coroutines.
 
 =item *
 
-The L<EV> event loop.
+An L<AnyEvent> infinite wait, which equates to the "run the event loop."
 
 =back
 
@@ -186,10 +204,12 @@ sub loop {
         $Coro::current->prio(3);
         $Coro::current->desc("Event loop");
 
-        # Use EV signal handlers;
-        my @shutdown = map EV::signal( $_ => sub { $self->server_close; } ),
-            qw/INT TERM QUIT/;
-        EV::loop() while 1;
+        my $exit = AnyEvent->condvar;
+        my @shutdown = map { AnyEvent->signal(
+            signal => $_,
+            cb     => sub { $self->server_close; $exit->send; }
+        ) } qw/INT TERM QUIT/;
+        $exit->recv;
     };
 
     schedule;
@@ -229,7 +249,7 @@ sub server_key {
 
 =head1 DEPENDENCIES
 
-L<Coro>, L<EV>, L<Net::Server>
+L<Coro>, L<AnyEvent>, L<Net::Server>
 
 =head1 BUGS AND LIMITATIONS
 
@@ -287,14 +307,11 @@ package # Hide from PAUSE indexer
 no warnings 'redefine';
 
 sub accept {
-    my $sock = shift;
-    my ( $client, $peername ) = $sock->SUPER::accept();
-
-    ### pass items on
-    if ($peername) {
-        $client->NS_proto( $sock->NS_proto );
+    my ($sock, $class) = (@_);
+    my ($client, $peername) = $sock->SUPER::accept($class);
+    if (defined $client) {
+        $client->NS_port($sock->NS_port);
     }
-
     return wantarray ? ( $client, $peername ) : $client;
 }
 
